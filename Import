@@ -1,0 +1,278 @@
+/**
+ * @NApiVersion 2.x
+ * @NScriptType MapReduceScript
+ */
+define(['N/record', 'N/search', 'N/render', 'N/email', 'N/file', 'N/runtime'],
+    function (record, search, render, email, file, runtime) {
+
+
+
+        function getCustRecords(context) {
+            var soSearch = search.load({
+                id: 'customsearch_payroll_folder_search' // change this based on the created saved search
+            });
+
+            var soResult = [];
+            var count = 0;
+            var pageSize = 1000;
+            var start = 0;
+            do {
+                var soResultSet = soSearch.run().getRange({
+                    start: start,
+                    end: start + pageSize
+                });
+
+                soResult = soResult.concat(soResultSet);
+                count = soResultSet.length;
+                start += pageSize;
+
+            } while (count == pageSize);
+
+            return soResult
+        }
+
+
+
+
+        function map(context) {
+
+            var searchResult = JSON.parse(context.value)
+            log.debug({
+                title: 'MAP JSON',
+                details: searchResult
+            })
+
+
+            var invObj = {
+                "id": "",
+                "filename": ""
+            }
+
+
+            invObj.id = searchResult.values['file.internalid'][0].value
+            invObj.filename = searchResult.values['file.name']
+
+
+            context.write({
+                key: invObj,
+                value: 1
+            })
+
+
+
+
+        }
+
+
+        function gatherInfo(context) {
+            log.debug("reduce", context.key)
+            var reduceObj = JSON.parse(context.key)
+            var parsedValues = []
+            try {
+
+                var scriptRec = runtime.getCurrentScript();
+                var subId = scriptRec.getParameter({
+                    name: 'custscript_subsidiary'
+                });
+                log.debug('subId', subId)
+                log.debug('reduceObj', reduceObj.id)
+                var arrLines = file.load({
+                    id: reduceObj.id
+                }).getContents().split(/\n|\n\r/);;
+
+                for (var i = 1; i < arrLines.length; i++) {
+                    var content = arrLines[i].split(',');
+
+                    var fields = {
+                        payrollCateg: '',
+                        accNum: '',
+                        accName: '',
+                        amount: '',
+                        date: '',
+                        name: '',
+                        postingDate: ''
+                    }
+                    // add the columns of the CSV file here
+                    var col_PayCateg = content[0]; //first column     
+                    var col_AccNum = content[1]; //second column
+                    var col_AccName = content[2];
+                    var col_Amount = content[3];
+                    var col_Date = content[4];
+                    var col_Name = content[5];
+                    var col_PostingDate = content[6];
+
+                    fields.payrollCateg = col_PayCateg
+                    fields.accNum = col_AccNum
+                    fields.accName = col_AccName
+                    fields.amount = col_Amount
+                    fields.date = col_Date
+                    fields.name = col_Name
+                    fields.postingDate = col_PostingDate.replace('\r', '')
+
+                    log.debug('fields', fields)
+
+                    parsedValues.push(fields)
+
+
+
+                }
+                log.debug('parsedValues', parsedValues)
+
+
+
+                var jeRec = record.create({
+                    type: 'journalentry',
+                    isDynamic: true
+                })
+
+                jeRec.setValue('subsidiary', 5)
+
+
+
+
+
+
+                for (x = 0; x < parsedValues.length; x++) {
+
+                    jeRec.selectNewLine({
+                        sublistId: 'line'
+                    })
+
+
+
+                    // parsedValues[x].amount = formatAmount(parsedValues[x].amount)
+
+                    if (parsedValues[x].amount.indexOf('-') == 0) {
+                        jeRec.setCurrentSublistValue({
+                            sublistId: 'line',
+                            fieldId: 'account',
+                            value: 346
+                        })
+
+
+                        jeRec.setCurrentSublistValue({
+                            sublistId: 'line',
+                            fieldId: 'memo',
+                            value: parsedValues[x].accName
+                        })
+                        jeRec.setCurrentSublistValue({
+                            sublistId: 'line',
+                            fieldId: 'credit',
+                            value: parsedValues[x].amount
+                        })
+
+                        log.debug('credit', parsedValues[x].amount)
+
+                    } else {
+                        jeRec.setCurrentSublistValue({
+                            sublistId: 'line',
+                            fieldId: 'account',
+                            value: 224
+                        })
+
+
+                        jeRec.setCurrentSublistValue({
+                            sublistId: 'line',
+                            fieldId: 'memo',
+                            value: parsedValues[x].accName
+                        })
+                    }
+                    jeRec.setCurrentSublistValue({
+                        sublistId: 'line',
+                        fieldId: 'debit',
+                        value: parsedValues[x].amount
+                    })
+                    log.debug('debit', parsedValues[x].amount)
+
+
+                    var temp = getDepartment(parsedValues[x].accName)
+                    log.debug('temp', temp)
+                    jeRec.setCurrentSublistValue({
+                        sublistId: 'line',
+                        fieldId: 'department',
+                        value: temp
+                    })
+
+                    jeRec.commitLine({
+                        sublistId: 'line'
+                    })
+
+
+                }
+                log.debug('count', jeRec.getLineCount('line'))
+
+                var joId = jeRec.save();
+
+                log.debug('joId', joId)
+
+
+
+            } catch (e) {
+                log.debug('error on reduce', e)
+            }
+
+        }
+
+
+
+
+        function summarize(context) {
+
+
+
+
+        }
+
+        function getDepartment(accName) {
+
+            var depCode
+
+            switch (accName) {
+                case 'Salaries and Wages:Salaries & Wages Admin':
+                case 'Salaries and Wages:Salaries & Wages Delivery':
+                case 'Salaries and Wages:Salaries & Wages Sales':
+                case 'Salaries & Wages (ER-Taxes)':
+                    depCode = 2;
+                    break;
+                case 'Salaries and Wages:Salaries & Wages Bakery':
+                case 'SALARIES AND WAGES:SALARIES & WAGES BAKERY':
+                case 'Salaries and Wages:Salaries & Wages Bolacha Produc':
+                    depCode = 23;
+                    break;
+                case 'Salaries and Wages:Salaries & Wages Maintenance':
+                    depCode = 50;
+                    break;
+                case 'Salaries and Wages:Salaries & Wages Warehouse':
+                    depCode = 16;
+                    break;
+                case 'Rockland Payroll 7693':
+                    depCode = 6;
+                    break;
+                default:
+                    depCode = 2
+            }
+
+            return depCode
+        }
+
+        function formatAmount(amt) {
+            if (amt.includes('$') == true) {
+                amt = amt.replace('$', '')
+            }
+            if (amt.includes('(') == true) {
+                amt = amt.replace('(', '')
+                amt = amt.replace(')', '')
+                amt = amt.replace(',', '')
+                amt = '-' + amt
+            }
+
+            return amt
+        }
+
+        return {
+            getInputData: getCustRecords,
+            map: map,
+            reduce: gatherInfo,
+            summarize: summarize,
+        }
+    });
